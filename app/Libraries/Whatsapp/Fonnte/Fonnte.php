@@ -2,6 +2,7 @@
 
 namespace App\Libraries\Whatsapp\Fonnte;
 
+use App\Libraries\Whatsapp\Support\HttpClient;
 use App\Libraries\Whatsapp\Whatsapp;
 
 class Fonnte implements Whatsapp
@@ -17,53 +18,57 @@ class Fonnte implements Whatsapp
 
     public function getToken(): string
     {
-        return $this->token ?? env('WHATSAPP_TOKEN');
+        return $this->token ?: (string) env('WHATSAPP_TOKEN');
     }
 
     /**
-     * Send message to Fonnte API
-     * @param array|string $messages
-     * @return string
+     * Kirim pesan ke Fonnte API.
+     *
+     * @param array|string $messages satu pesan ['destination'=>, 'message'=>, 'delay'=>]
+     *                               atau array berisi beberapa pesan seperti itu
+     * @return string pesan hasil untuk di-log oleh pemanggil
      */
     public function sendMessage(array|string $messages): string
     {
-        $messages = isset($messages[0]) ? $messages : [$messages];
-        $fonnteMessage = new FonnteBulkMessage($messages);
-        $curl = curl_init();
-        $jsonMessage = $fonnteMessage->toJson();
+        if (is_string($messages)) {
+            return 'Format pesan tidak valid: Fonnte membutuhkan array pesan';
+        }
 
-        // Enable verbose output for debugging
-        curl_setopt($curl, CURLOPT_VERBOSE, true);
-        curl_setopt_array($curl, array(
-            CURLOPT_URL => $this->urlApi,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_ENCODING => '',
-            CURLOPT_MAXREDIRS => 10,
-            CURLOPT_TIMEOUT => 0,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_1_1,
-            CURLOPT_CUSTOMREQUEST => 'POST',
-            CURLOPT_POSTFIELDS => array('data' => $jsonMessage),
-            CURLOPT_HTTPHEADER => array(
-                "Authorization: {$this->getToken()}" //change TOKEN to your actual token
-            ),
-        ));
-
-        $response = curl_exec($curl);
-
-        curl_close($curl);
+        // Bulk kalau elemen pertama sendiri berupa array pesan.
+        $isBulk   = isset($messages[0]) && is_array($messages[0]);
+        $messages = $isBulk ? $messages : [$messages];
 
         try {
-            $responseStatus = json_decode($response, 1);
-            $resultMessage = $responseStatus['reason'] ?? '';
-
-            if ($responseStatus['status']) {
-                $resultMessage = $responseStatus['detail'] ?? 'Sukses';
-            }
-
-            return $resultMessage;
-        } catch (\Exception $e) {
-            return $e->getMessage();
+            $payload = (new FonnteBulkMessage($messages))->toJson();
+        } catch (\Throwable $e) {
+            return 'Gagal menyusun pesan: ' . $e->getMessage();
         }
+
+        $response = HttpClient::post(
+            $this->urlApi,
+            ['data' => $payload],
+            ["Authorization: {$this->getToken()}"]
+        );
+
+        if ($response->error !== '') {
+            return 'Gagal menghubungi Fonnte: ' . $response->error;
+        }
+
+        $body = $response->json();
+
+        if ($body === null) {
+            return "Respons Fonnte tidak valid (HTTP {$response->status})";
+        }
+
+        if (empty($body['status'])) {
+            return $body['reason'] ?? "Fonnte menolak pesan (HTTP {$response->status})";
+        }
+
+        $detail = $body['detail'] ?? '';
+        $detail = is_array($detail) ? implode('; ', $detail) : (string) $detail;
+
+        // Awalan "Sukses" adalah penanda seragam antar provider, dipakai
+        // pemanggil untuk memilih level log.
+        return $detail !== '' ? "Sukses: {$detail}" : 'Sukses';
     }
 }
